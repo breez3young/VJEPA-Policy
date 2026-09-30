@@ -201,8 +201,8 @@ bash scripts/train_vjepa_policy_droid_init.sh
 ```
 
 The paper setting is two independent 224px views, 32-step actions, global batch
-128, and 21,360 updates. DROID uses a 129-token cache; LIBERO uses 128. The
-When DROID has four view-embedding rows and LIBERO has two inputs, the loader
+128, and 21,360 updates. DROID uses a 129-token cache; LIBERO uses 128. When
+DROID has four view-embedding rows and LIBERO has two inputs, the loader
 automatically maps source rows `[0, 1]` into the two-row policy embedding; all
 other predictor parameters still load strictly. Use `--predictor-view-map` to
 override that mapping for a custom camera order.
@@ -226,13 +226,20 @@ for a smoke run; the paper protocol uses four suites and 50 trials per task.
 
 ```bash
 export VJEPA2_ENCODER_CHECKPOINT=/path/to/encoder.pt
-export TEXT_EMBEDDING_CACHE=/path/to/libero_t5_len128
+export TEXT_EMBEDDING_CACHE=/path/to/libero_t5xxl_len128
 export POLICY_PYTHON=/path/to/policy/python
 export LIBERO_PYTHON=/path/to/libero/python
 export EVAL_DIR=/path/to/results/libero
 bash examples/libero/evaluate_policy.sh /path/to/run_dir \
   /path/to/run_dir/checkpoint_step021360.pt
 ```
+
+On the reference machine, the tested environments are
+`/data/zhangyang/miniconda3/envs/libero` for simulation,
+`/data/zhangyang/miniconda3/envs/libero-plus-eval` for LIBERO-Plus, and
+`/data/zhangyang/miniconda3/envs/libero-pro-eval` for LIBERO-Pro. The policy
+server uses the project policy environment; set `POLICY_PYTHON` explicitly when
+it is different from the shell's Python.
 
 LIBERO-Plus is evaluated through the external
 [`allenai/vla-evaluation-harness`](https://github.com/allenai/vla-evaluation-harness).
