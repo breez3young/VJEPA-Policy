@@ -265,7 +265,7 @@ scripts/run_libero_plus_canonical.sh \
   --checkpoint /path/to/checkpoint_step021360.pt \
   --pretrained-encoder /path/to/vjepa2_1_vitl.pt \
   --dataset-stats /path/to/dataset_stats.json \
-  --text-cache-dir /path/to/libero_plus_t5_len128 \
+  --text-cache-dir /path/to/libero_plus_t5xxl_len128 \
   --gpus 0,1,2,3 --sim-gpus 0,1,2,3 \
   --clients-per-gpu 8 --batch-size 8 \
   --output-dir /path/to/results/libero-plus
