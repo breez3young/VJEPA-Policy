@@ -5,7 +5,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/breez3young/VJEPA-Policy"><img src="https://img.shields.io/badge/code-GitHub-181717?style=flat&logo=github" alt="Code"></a>
   <a href="https://github.com/breez3young/VJEPA-Policy/blob/release/LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f6f68?style=flat" alt="MIT license"></a>
   <a href="https://www.python.org/downloads/release/python-3100/"><img src="https://img.shields.io/badge/Python-%3E%3D3.10-3776ab?style=flat&logo=python&logoColor=white" alt="Python 3.10 or newer"></a>
   <a href="https://arxiv.org/abs/2609.37250"><img src="https://img.shields.io/badge/arXiv-2609.37250-b31b1b?style=flat&logo=arxiv&logoColor=white" alt="arXiv:2609.37250"></a>
@@ -21,9 +20,6 @@ The released recipe uses V-JEPA 2.1 ViT-L and T5-XXL as frozen encoders. The
 visual encoder is a registry entry, so a different visual latent substrate can
 be selected without changing the predictor or action expert. Checkpoints,
 datasets, simulator assets, text caches, and evaluation outputs stay outside Git.
-
-**Paper:** [V-JEPA Policy: Building Effective World-Action Models on Predictive
-Visual Latents](https://arxiv.org/pdf/2609.37250).
 
 ## Results at a glance
 
