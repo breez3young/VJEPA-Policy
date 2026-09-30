@@ -23,6 +23,7 @@ Common options:
   --allow-incomplete       validate SQLite integrity without full 10,030 coverage
   --gpus LIST             policy server GPU ids (default: 0,1,2,3)
   --sim-gpus LIST         simulator GPU ids (default: same as --gpus)
+  --render MODE            simulator renderer: cpu (OSMesa, default) or gpu (EGL)
   --clients-per-gpu N     simulator clients per policy server (default: 8)
   --batch-size N          server batch size (default: clients per server)
   --base-port N           first localhost server port (default: 31100)
@@ -47,6 +48,7 @@ TEXT_CACHE_DIR="${VJEPA_TEXT_CACHE_DIR:-}"
 BENCHMARK_CONFIG="$ROOT/configs/libero_plus_all.yaml"
 GPU_LIST="0,1,2,3"
 SIM_GPU_LIST=""
+RENDER_MODE="cpu"
 CLIENTS_PER_GPU=8
 BATCH_SIZE=""
 BASE_PORT=31100
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --allow-incomplete) ALLOW_INCOMPLETE=true; shift ;;
     --gpus) GPU_LIST="$2"; shift 2 ;;
     --sim-gpus) SIM_GPU_LIST="$2"; shift 2 ;;
+    --render) RENDER_MODE="$2"; shift 2 ;;
     --clients-per-gpu) CLIENTS_PER_GPU="$2"; shift 2 ;;
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --base-port) BASE_PORT="$2"; shift 2 ;;
@@ -77,6 +80,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage 1 ;;
   esac
 done
+
+case "$RENDER_MODE" in
+  cpu|gpu) ;;
+  *) echo "--render must be cpu or gpu" >&2; exit 2 ;;
+esac
 
 [[ -n "$SERVER_CONFIG" ]] || { echo "--server-config is required" >&2; exit 2; }
 [[ -n "$CHECKPOINT" ]] || { echo "--checkpoint is required" >&2; exit 2; }
@@ -127,6 +135,29 @@ PRETRAINED_ENCODER="$(readlink -f "$PRETRAINED_ENCODER")"
 DATASET_STATS="$(readlink -f "$DATASET_STATS")"
 TEXT_CACHE_DIR="$(readlink -f "$TEXT_CACHE_DIR")"
 BENCHMARK_CONFIG="$(readlink -f "$BENCHMARK_CONFIG")"
+
+# Preserve the state contract serialized by the policy checkpoint. Legacy
+# LIBERO checkpoints omit ``policy_serving`` and use variable-width state;
+# DROID-initialized checkpoints record the fixed 48-dimension contract.
+POLICY_CONFIG="$($SERVER_PYTHON - "$CHECKPOINT" <<'PY'
+import json
+import sys
+import torch
+
+checkpoint = torch.load(sys.argv[1], map_location="cpu", weights_only=False, mmap=True)
+serving = checkpoint.get("policy_serving") or {}
+saved = serving.get("config") or {}
+topology = checkpoint.get("model_topology") or {}
+max_state_dim = saved.get("max_state_dim", topology.get("max_state_dim"))
+if max_state_dim is None:
+    max_state_dim = 0
+print(json.dumps({
+    "max_state_dim": int(max_state_dim),
+    "t5_len": int(saved.get("t5_len", 128)),
+}, separators=(",", ":")))
+PY
+)"
+echo "Using policy config: $POLICY_CONFIG"
 
 # Check the canonical cache contract without adding a repository-specific
 # digest or checksum requirement. The harness still owns cache file loading.
@@ -213,7 +244,8 @@ for index in "${!GPUS[@]}"; do
     --arg "checkpoint=$CHECKPOINT" \
     --arg "pretrained_encoder=$PRETRAINED_ENCODER" \
     --arg "dataset_stats=$DATASET_STATS" \
-    --arg "text_cache_dir=$TEXT_CACHE_DIR" >"$log" 2>&1 &
+    --arg "text_cache_dir=$TEXT_CACHE_DIR" \
+    --arg "policy_config=$POLICY_CONFIG" >"$log" 2>&1 &
   SERVER_PIDS+=("$!")
 done
 
@@ -228,17 +260,32 @@ for index in "${!GPUS[@]}"; do
 done
 
 echo "Running $NUM_SHARDS shards on servers GPU=$GPU_LIST, simulator GPU=$SIM_GPU_LIST, clients/server=$CLIENTS_PER_GPU, batch=$BATCH_SIZE"
+echo "Simulator renderer: $RENDER_MODE"
 for shard in $(seq 0 $((NUM_SHARDS - 1))); do
   server_index=$((shard % NUM_SERVERS))
   sim_gpu="${SIM_GPUS[$server_index]}"
   port=$((BASE_PORT + server_index))
   log="$LOCAL_DIR/shard-$(printf '%03d' "$shard").log"
-  env -u LIBGL_ALWAYS_SOFTWARE \
-    CUDA_VISIBLE_DEVICES="$sim_gpu" MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
-    EGL_PLATFORM=device MUJOCO_EGL_DEVICE_ID="$sim_gpu" \
+  if [[ "$RENDER_MODE" == "gpu" ]]; then
+    render_env=(
+      CUDA_VISIBLE_DEVICES="$sim_gpu"
+      MUJOCO_GL=egl
+      PYOPENGL_PLATFORM=egl
+      EGL_PLATFORM=device
+      # CUDA_VISIBLE_DEVICES exposes one physical GPU as local device 0.
+      MUJOCO_EGL_DEVICE_ID=0
+    )
+  else
+    render_env=(
+      MUJOCO_GL=osmesa
+      PYOPENGL_PLATFORM=osmesa
+      LIBGL_ALWAYS_SOFTWARE=1
+    )
+  fi
+  env -u EGL_PLATFORM -u MUJOCO_EGL_DEVICE_ID "${render_env[@]}" \
     OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
     "$BENCH_ENV/bin/vla-eval" run -c "$BENCHMARK_CONFIG" --eval-id "$EVAL_ID" \
-    --output-dir "$LOCAL_DIR" --render gpu --server-url "ws://127.0.0.1:$port" \
+    --output-dir "$LOCAL_DIR" --render "$RENDER_MODE" --server-url "ws://127.0.0.1:$port" \
     --param send_wrist_image=true --param send_state=true --param quat_no_antipodal=true \
     --no-docker --shard-id "$shard" --num-shards "$NUM_SHARDS" >"$log" 2>&1 &
   SHARD_PIDS+=("$!")
@@ -335,7 +382,7 @@ mkdir -p "$OUTPUT_DIR/logs"
 "$BENCH_ENV/bin/vla-eval" merge --db "$DB" --output-dir "$OUTPUT_DIR" >"$LOCAL_DIR/merge.log" 2>&1
 cp "$DB" "$OUTPUT_DIR/recording-$EVAL_ID.sqlite"
 cp "$LOCAL_DIR"/model-server-*.log "$LOCAL_DIR"/shard-*.log "$LOCAL_DIR/merge.log" "$OUTPUT_DIR/logs/"
-printf 'eval_id=%s\nserver_gpus=%s\nsimulator_gpus=%s\nservers=%s\nshards=%s\nclients_per_server=%s\nbatch_size=%s\n' \
-  "$EVAL_ID" "$GPU_LIST" "$SIM_GPU_LIST" "$NUM_SERVERS" "$NUM_SHARDS" "$CLIENTS_PER_GPU" "$BATCH_SIZE" \
+printf 'eval_id=%s\nserver_gpus=%s\nsimulator_gpus=%s\nservers=%s\nshards=%s\nclients_per_server=%s\nbatch_size=%s\nrender=%s\n' \
+  "$EVAL_ID" "$GPU_LIST" "$SIM_GPU_LIST" "$NUM_SERVERS" "$NUM_SHARDS" "$CLIENTS_PER_GPU" "$BATCH_SIZE" "$RENDER_MODE" \
   >"$OUTPUT_DIR/run_topology.txt"
 echo "Results written to $OUTPUT_DIR"

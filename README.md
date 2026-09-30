@@ -38,14 +38,14 @@ predictor; the action expert is initialized from scratch downstream.
 
 | Capability | Entry point | Status |
 | --- | --- | --- |
-| Predictor pretraining on DROID | `scripts/pretrain_droid_predictor_vjepa21_maxviews4.sh` | Reproduction recipe |
-| Predictor pretraining on any dataset | `scripts/pretrain_predictor.py` | Dataset factory |
-| Policy post-training on LeRobot | `scripts/train_vjepa_policy.sh` | Built-in adapter |
-| Policy post-training on any dataset | `scripts/train_vjepa_policy.py` | Dataset factory |
-| LIBERO train/eval | `examples/libero/` | Included; simulator is external |
-| RoboCasa-GR1 train/eval | `scripts/gr1/`, `examples/gr1/` | Rollout environment is external |
-| LIBERO-Plus | External `vla-evaluation-harness` | Integration contract; not vendored |
-| Alternate visual encoders | `src/vjepa_policy/encoders/` | Registry and geometry contract |
+| DROID predictor pretraining | `scripts/pretrain_droid_predictor_vjepa21_maxviews4.sh` | Reference recipe |
+| Predictor pretraining on custom datasets | `scripts/pretrain_predictor.py` | Dataset factory API |
+| Policy post-training on LeRobot | `scripts/train_vjepa_policy.sh` | LeRobot adapter |
+| Policy post-training on custom datasets | `scripts/train_vjepa_policy.py` | Dataset factory API |
+| LIBERO training and evaluation | `examples/libero/` | Reference scripts; requires the LIBERO simulator |
+| RoboCasa-GR1 training and evaluation | `scripts/gr1/`, `examples/gr1/` | Reference scripts; requires RoboCasa and Isaac-GR00T |
+| LIBERO-Plus evaluation | `scripts/run_libero_plus_canonical.sh` | External `vla-evaluation-harness` integration |
+| Alternative visual encoders | `src/vjepa_policy/encoders/` | Encoder registry and geometry contract |
 
 ## Layout
 
@@ -219,8 +219,10 @@ environment is external.
 ## Evaluation
 
 For LIBERO, set the matching encoder, 128-token cache, Python environments, and
-output directory. Use `EVAL_SUITES=libero_spatial NUM_TRIALS_PER_TASK=1` for a
-smoke run; the paper protocol uses four suites and 50 trials per task.
+output directory. The same command evaluates scratch and DROID-initialized
+checkpoints; provide the corresponding run directory, checkpoint, and
+`dataset_stats.json`. Use `EVAL_SUITES=libero_spatial NUM_TRIALS_PER_TASK=1`
+for a smoke run; the paper protocol uses four suites and 50 trials per task.
 
 ```bash
 export VJEPA2_ENCODER_CHECKPOINT=/path/to/encoder.pt
@@ -232,9 +234,9 @@ bash examples/libero/evaluate_policy.sh /path/to/run_dir \
   /path/to/run_dir/checkpoint_step021360.pt
 ```
 
-LIBERO-Plus uses [`allenai/vla-evaluation-harness`](https://github.com/allenai/vla-evaluation-harness)
-with the V-JEPA server/cache integration. A clean upstream clone does not
-include that integration; use a V-JEPA-enabled checkout containing
+LIBERO-Plus is evaluated through the external
+[`allenai/vla-evaluation-harness`](https://github.com/allenai/vla-evaluation-harness).
+Use a harness checkout that provides the V-JEPA integration:
 `scripts/libero_plus_runtime_env.sh`,
 `src/vla_eval/model_servers/vjepa_policy.py`, and
 `configs/model_servers/vjepa_policy/vjepa2_1_libero.yaml`.

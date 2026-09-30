@@ -25,6 +25,7 @@ EVAL_SEED=${EVAL_SEED:-7}
 # config defaults still cover metadata-free canonical checkpoints.
 POLICY_PRECISION=${POLICY_PRECISION:-}
 POLICY_T5_LEN=${POLICY_T5_LEN:-}
+POLICY_MAX_STATE_DIM=${POLICY_MAX_STATE_DIM:-}
 POLICY_CROP_SIZE=${POLICY_CROP_SIZE:-}
 POLICY_VIEW_LAYOUT=${POLICY_VIEW_LAYOUT:-}
 POLICY_VIEWS=${POLICY_VIEWS:-}
@@ -56,6 +57,22 @@ fi
 if [[ ! -f "$POLICY_SERVER_SCRIPT" ]]; then
   echo "Missing policy server script: $POLICY_SERVER_SCRIPT" >&2
   exit 1
+fi
+if [[ -z "$POLICY_MAX_STATE_DIM" || -z "$POLICY_T5_LEN" ]]; then
+  read -r checkpoint_state_dim checkpoint_t5_len < <("$POLICY_PYTHON" - "$CHECKPOINT" <<'PY'
+import sys
+import torch
+
+checkpoint = torch.load(sys.argv[1], map_location="cpu", weights_only=False, mmap=True)
+serving = checkpoint.get("policy_serving") or {}
+saved = serving.get("config") or {}
+topology = checkpoint.get("model_topology") or {}
+state_dim = saved.get("max_state_dim", topology.get("max_state_dim"))
+print(0 if state_dim is None else int(state_dim), int(saved.get("t5_len", 128)))
+PY
+  )
+  [[ -n "$POLICY_MAX_STATE_DIM" ]] || POLICY_MAX_STATE_DIM="$checkpoint_state_dim"
+  [[ -n "$POLICY_T5_LEN" ]] || POLICY_T5_LEN="$checkpoint_t5_len"
 fi
 if (( ${#SUITES[@]} == 0 )); then
   echo "EVAL_SUITES must contain at least one suite" >&2
@@ -145,6 +162,9 @@ run_suite() (
   fi
   if [[ -n "$POLICY_T5_LEN" ]]; then
     serving_args+=(--t5-len "$POLICY_T5_LEN")
+  fi
+  if [[ -n "$POLICY_MAX_STATE_DIM" ]]; then
+    serving_args+=(--max-state-dim "$POLICY_MAX_STATE_DIM")
   fi
   if [[ -n "$POLICY_CROP_SIZE" ]]; then
     serving_args+=(--crop-size "$POLICY_CROP_SIZE")
