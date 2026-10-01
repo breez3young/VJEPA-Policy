@@ -2,21 +2,25 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+source "$ROOT/configs/recipes/libero.env"
 cd "$ROOT"
 export PYTHONPATH="$ROOT:$ROOT/src:${PYTHONPATH:-}"
 
 PYTHON=${PYTHON:-python}
 TRAIN_SCRIPT=${TRAIN_SCRIPT:-scripts/train_vjepa_policy.py}
+# Keep the checked global batch consistent with the actual training arguments.
+for argument in "$@"; do
+  case "$argument" in
+    --batch-size|--batch-size=*|--gradient-accumulation-steps|--gradient-accumulation-steps=*)
+      echo "Set BATCH_SIZE / GRAD_ACCUM in the environment so GLOBAL_BATCH_SIZE can be checked" >&2
+      exit 64 ;;
+  esac
+done
 : "${LIBERO_DATA_ROOT:?Set LIBERO_DATA_ROOT to the directory containing the four LeRobot LIBERO datasets}"
 : "${VJEPA2_ENCODER_CHECKPOINT:?Set VJEPA2_ENCODER_CHECKPOINT to the pretrained V-JEPA2 encoder checkpoint}"
 : "${TEXT_EMBEDDING_CACHE:?Set TEXT_EMBEDDING_CACHE to the precomputed instruction embeddings}"
 DATASET_STATS=${DATASET_STATS:-}
-NUM_GPUS=${NUM_GPUS:-4}
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-29500}
-BATCH_SIZE=${BATCH_SIZE:-32}
-GRAD_ACCUM=${GRAD_ACCUM:-1}
-MAX_STEPS=${MAX_STEPS:-21360}
-SAVE_EVERY=${SAVE_EVERY:-2000}
 SEED=${SEED:-7}
 PRED_DEPTH=${PRED_DEPTH:-24}
 PRED_EMBED_DIM=${PRED_EMBED_DIM:-1024}
@@ -27,37 +31,12 @@ NUM_WORKERS=${NUM_WORKERS:-8}
 PREFETCH_FACTOR=${PREFETCH_FACTOR:-2}
 RECYCLE_WORKERS_EVERY=${RECYCLE_WORKERS_EVERY:-0}
 CROP_SIZE=${CROP_SIZE:-224}
-CONTEXT_LEN=${CONTEXT_LEN:-32}
 VIEW_LAYOUT=${VIEW_LAYOUT:-independent}
-ACTIVATION_CHECKPOINTING_BLOCKS=${ACTIVATION_CHECKPOINTING_BLOCKS:-12}
 PREDICTOR_ROPE_FREQUENCY_PAIRING=${PREDICTOR_ROPE_FREQUENCY_PAIRING:-corrected}
 ENCODER_INTERPOLATE_ROPE=${ENCODER_INTERPOLATE_ROPE:-1}
-ENCODER_FAMILY=${ENCODER_FAMILY:-vjepa2}
-ENCODER=${ENCODER:-}
-if [[ "$TRAIN_SCRIPT" == "scripts/train_vjepa_policy.py" ]]; then
-  ENCODER_MODEL_NAME=${ENCODER_MODEL_NAME:-vit_large}
-  ENCODER_CHECKPOINT_KEY=${ENCODER_CHECKPOINT_KEY:-target_encoder}
-else
-  ENCODER_MODEL_NAME=${ENCODER_MODEL_NAME:-vit_giant_xformers}
-  ENCODER_CHECKPOINT_KEY=${ENCODER_CHECKPOINT_KEY:-encoder}
-fi
 MIXED_PRECISION=${MIXED_PRECISION:-bf16}
-MAX_STATE_DIM=${MAX_STATE_DIM:-48}
 PREDICTOR_INIT=${PREDICTOR_INIT:-}
 OUTDIR=${OUTDIR:-./runs/vjepa_policy_vitl_gbs128_seed${SEED}}
-
-# The canonical launcher uses the stable registry id.  Route 2 and historical
-# launchers may leave ENCODER empty and continue using their legacy family/model
-# arguments until they are migrated.
-if [[ -z "$ENCODER" && "$TRAIN_SCRIPT" == "scripts/train_vjepa_policy.py" \
-      && "$ENCODER_FAMILY" == "vjepa2" \
-      && "$ENCODER_MODEL_NAME" == "vit_large" \
-      && "$ENCODER_CHECKPOINT_KEY" == "target_encoder" ]]; then
-  ENCODER=vjepa2_vitl
-  ENCODER_FAMILY=vjepa2
-  ENCODER_MODEL_NAME=vit_large
-  ENCODER_CHECKPOINT_KEY=target_encoder
-fi
 
 ROPE_ARGS=()
 ROPE_ARGS+=(--predictor-rope-frequency-pairing "$PREDICTOR_ROPE_FREQUENCY_PAIRING")
@@ -75,7 +54,11 @@ ENCODER_ARGS=()
 if [[ -n "$ENCODER" ]]; then
   ENCODER_ARGS+=(--encoder "$ENCODER")
 fi
-echo "global_batch_size=$((NUM_GPUS * BATCH_SIZE * GRAD_ACCUM))"
+if (( NUM_GPUS * BATCH_SIZE * GRAD_ACCUM != GLOBAL_BATCH_SIZE )); then
+  echo "Expected global batch $GLOBAL_BATCH_SIZE; got $((NUM_GPUS * BATCH_SIZE * GRAD_ACCUM))" >&2
+  exit 64
+fi
+echo "global_batch_size=$GLOBAL_BATCH_SIZE"
 
 DATASETS=(
   "$LIBERO_DATA_ROOT/libero_object_no_noops_1.0.0_lerobot"

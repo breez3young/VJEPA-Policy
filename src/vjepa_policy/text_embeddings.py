@@ -26,6 +26,11 @@ def precompute_text_embeddings(
     device="cuda",
     instruction_field="task",
 ):
+    encode_prompts(read_prompts(dataset_dirs, instruction_field), cache_dir, model_name, context_length, device)
+
+
+def encode_prompts(prompts, cache_dir, model_name, context_length, device="cuda"):
+    """Encode complete prompts with the same payload and hashing as training."""
     from transformers import AutoTokenizer, T5EncoderModel
 
     cache_dir = Path(cache_dir)
@@ -34,7 +39,7 @@ def precompute_text_embeddings(
     encoder = T5EncoderModel.from_pretrained(model_name).to(device).eval()
 
     for prompt in tqdm(
-        read_prompts(dataset_dirs, instruction_field),
+        prompts,
         desc="Encoding task prompts",
     ):
         unpadded_tokens = tokenizer(
@@ -52,6 +57,12 @@ def precompute_text_embeddings(
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         output_path = cache_dir / f"{digest}.t5_len{context_length}.pt"
         if output_path.is_file():
+            cached = torch.load(output_path, map_location="cpu", weights_only=True)
+            context, mask = cached["context"], cached["mask"]
+            if (context.shape != (context_length, encoder.config.d_model)
+                    or mask.shape != (context_length,) or not torch.isfinite(context).all()
+                    or mask.sum().item() != prompt_length):
+                raise ValueError(f"Invalid existing text cache entry: {output_path}")
             continue
         tokens = tokenizer(
             prompt,
@@ -65,10 +76,12 @@ def precompute_text_embeddings(
                 input_ids=tokens.input_ids.to(device),
                 attention_mask=tokens.attention_mask.to(device),
             ).last_hidden_state[0].cpu()
+        temporary = output_path.with_suffix(".tmp")
         torch.save(
             {"context": context, "mask": tokens.attention_mask[0].bool()},
-            output_path,
+            temporary,
         )
+        temporary.replace(output_path)
 
 
 def main(argv=None):
@@ -76,7 +89,7 @@ def main(argv=None):
     parser.add_argument("--dataset-dirs", nargs="+", required=True)
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--model-name", default="google/t5-v1_1-xxl")
-    parser.add_argument("--context-length", type=int, default=32)
+    parser.add_argument("--context-length", type=int, default=128)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--instruction-field", choices=("task", "remarks"), default="task")
     args = parser.parse_args(argv)

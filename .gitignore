@@ -19,3 +19,7 @@ staging*/
 *.lock
 MUJOCO_LOG.TXT
 .DS_Store
+
+# Local environments and machine-specific recipe copies
+.venv/
+configs/*.local.env

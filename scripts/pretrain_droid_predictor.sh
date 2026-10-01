@@ -7,17 +7,14 @@ set -euo pipefail
 # requested global batch size of 192 (24 samples per rank on 8 GPUs) and
 # 100,000 optimizer steps.
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-NUM_GPUS=${NUM_GPUS:-8}
-GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-192}
+source "$ROOT/configs/recipes/droid.env"
 PYTHON=${PYTHON:-python}
 ACCELERATE=${ACCELERATE:-accelerate}
 : "${ENCODER_CHECKPOINT:?Set ENCODER_CHECKPOINT to a pretrained visual encoder}"
 : "${DATASET_ROOT:?Set DATASET_ROOT to the DROID LeRobot dataset}"
 : "${TEXT_CACHE_DIR:?Set TEXT_CACHE_DIR to the DROID T5 cache}"
 OUTPUT_DIR=${OUTPUT_DIR:-$ROOT/runs/droid_predictor_pretraining_prts_5fps_bs192_100k}
-BATCH_SIZE=${BATCH_SIZE:-24}
 NUM_EPOCHS=${NUM_EPOCHS:-2}
-MAX_STEPS=${MAX_STEPS:-100000}
 NUM_WORKERS=${NUM_WORKERS:-4}
 RECYCLE_WORKERS_EVERY=${RECYCLE_WORKERS_EVERY:-500}
 

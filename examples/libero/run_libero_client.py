@@ -21,18 +21,22 @@
 #      replan_steps. The server's generic `observation/<name>` conversion
 #      handles the extra keys with no changes to the shared transport code.
 #
-# Run in the `libero` conda env (already has openpi_client + libero/robosuite/
-# mujoco; do NOT install/upgrade anything in it):
-#   python \
-#       examples/libero/run_libero_client.py \
-#       --task_suite_name libero_object --port 10000 --replan_steps 16
+# Use the simulator environment selected in examples/libero/README.md or
+# examples/libero_plus/README.md. The policy server runs separately.
 
 import collections
 import dataclasses
 import logging
+import json
+import sys
 import math
 import pathlib
-from typing import Optional
+from typing import Literal, Optional
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from examples.libero_plus.protocol import (
+    CLASSIFICATION_SHA256, digest_file, load_manifest, task_instruction,
+)
 
 import imageio
 from libero.libero import benchmark
@@ -54,7 +58,7 @@ class Args:
     #################################################################################################################
     # Model server parameters
     #################################################################################################################
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 10000
     resize_size: int = 256  # Native LIBERO render resolution. The server independently
                              # resizes each camera view to the policy's 224x224 input grid.
@@ -68,6 +72,9 @@ class Args:
         "libero_spatial"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize in sim
+    benchmark: Literal["libero", "libero-plus"] = "libero"
+    manifest: Optional[str] = None  # Required for LIBERO-Plus.
+    record_video: bool = True
     num_trials_per_task: int = 50  # Number of rollouts per task
     max_tasks: Optional[int] = None  # Optional smoke-test limit; None evaluates the full suite.
 
@@ -80,6 +87,21 @@ class Args:
 
 
 def eval_libero(args: Args) -> None:
+    if min(args.replan_steps, args.num_trials_per_task, args.resize_size) <= 0 or args.frame_stride < 0 or args.num_steps_wait < 0:
+        raise ValueError("Invalid rollout geometry or episode count")
+    plus_tasks = {}
+    manifest_sha = None
+    if args.benchmark == "libero-plus":
+        if not args.manifest or args.num_trials_per_task != 1:
+            raise ValueError("LIBERO-Plus requires --args.manifest and one trial per task")
+        manifest = load_manifest(args.manifest)
+        manifest_sha = digest_file(args.manifest)
+        plus_tasks = {row["task_id"]: row for row in manifest["tasks"] if row["suite"] == args.task_suite_name}
+        classification = pathlib.Path(benchmark.__file__).parent / "task_classification.json"
+        if digest_file(classification) != CLASSIFICATION_SHA256:
+            raise ValueError("The simulator is not the pinned LIBERO-Plus installation")
+    elif args.manifest:
+        raise ValueError("--args.manifest is only used for LIBERO-Plus")
     # Set random seed
     np.random.seed(args.seed)
 
@@ -87,6 +109,8 @@ def eval_libero(args: Args) -> None:
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[args.task_suite_name]()
     num_tasks_in_suite = task_suite.n_tasks
+    if args.benchmark == "libero-plus" and len(plus_tasks) != num_tasks_in_suite:
+        raise ValueError("Manifest and simulator task counts differ")
     if args.max_tasks is not None:
         if args.max_tasks <= 0:
             raise ValueError(f"max_tasks must be positive, got {args.max_tasks}")
@@ -95,6 +119,9 @@ def eval_libero(args: Args) -> None:
     logging.info(f"Task suite: {args.task_suite_name}")
 
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+    episodes_path = pathlib.Path(args.video_out_path) / "episodes.jsonl"
+    if episodes_path.exists():
+        raise ValueError("Use a fresh output directory for each evaluation")
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -124,6 +151,13 @@ def eval_libero(args: Args) -> None:
         # Initialize LIBERO environment and task description
         env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
 
+        plus_task = plus_tasks.get(task_id)
+        if plus_task is not None:
+            instruction = task_instruction(task.name, plus_task["category"], task.language)
+            if plus_task["name"] != task.name or plus_task["instruction"] != instruction:
+                raise ValueError("Manifest and simulator task identity/instruction differ")
+            task_description = instruction
+
         # Start episodes
         task_episodes, task_successes = 0, 0
         for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
@@ -141,6 +175,7 @@ def eval_libero(args: Args) -> None:
 
             # Setup
             t = 0
+            done = False
             replay_images = []
 
             logging.info(f"Starting episode {task_episodes+1}...")
@@ -166,7 +201,8 @@ def eval_libero(args: Args) -> None:
                     frame_hist.append((img, wrist_img))
 
                     # Save preprocessed image for replay video
-                    replay_images.append(img)
+                    if args.record_video:
+                        replay_images.append(img)
 
                     if not action_plan:
                         # Finished executing previous action chunk -- compute new chunk.
@@ -194,10 +230,10 @@ def eval_libero(args: Args) -> None:
                         }
 
                         # Query model to get action
-                        action_chunk = client.infer(element)["actions"]  # (chunk_size, action_dim)
-                        assert (
-                            len(action_chunk) >= args.replan_steps
-                        ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
+                        action_chunk = np.asarray(client.infer(element)["actions"])
+                        if (action_chunk.ndim != 2 or action_chunk.shape[1] != 7
+                                or len(action_chunk) < args.replan_steps or not np.isfinite(action_chunk).all()):
+                            raise ValueError("Policy must return finite [chunk >= replan_steps, 7] actions")
                         action_plan.extend(action_chunk[: args.replan_steps])
 
                     action = action_plan.popleft()
@@ -217,14 +253,19 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            row = {"suite": args.task_suite_name, "task_id": task_id,
+                   "name": task.name, "episode_id": episode_idx,
+                   "instruction": task_description, "success": bool(done)}
+            if plus_task is not None:
+                row.update(category=plus_task["category"], manifest_sha256=manifest_sha)
+            with episodes_path.open("a", encoding="utf-8") as result_file:
+                result_file.write(json.dumps(row) + "\n")
+            if args.record_video and replay_images:
+                suffix = "success" if done else "failure"
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path) / f"task{task_id:04d}_episode{episode_idx:03d}_{suffix}.mp4",
+                    replay_images, fps=10,
+                )
 
             # Log current results
             logging.info(f"Success: {done}")
@@ -267,7 +308,8 @@ def _get_libero_env(task, resolution, seed):
     """Initializes and returns the LIBERO environment, along with the task description."""
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
-    env_args = {"bddl_file_name": task_bddl_file, "camera_heights": resolution, "camera_widths": resolution}
+    # Plus parses camera/noise suffixes with string operations before opening BDDL.
+    env_args = {"bddl_file_name": str(task_bddl_file), "camera_heights": resolution, "camera_widths": resolution}
     env = OffScreenRenderEnv(**env_args)
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description

@@ -3,7 +3,7 @@
 An adapter keeps dataset-specific decoding out of the model and trainer.  A
 factory is imported from ``module:function`` and receives the parsed argparse
 namespace.  The returned dataset must yield the keys documented in
-``README.md``; the stock collators add masks and stack tensors.
+``docs/extensions.md``; the stock collators add masks and stack tensors.
 """
 
 from __future__ import annotations

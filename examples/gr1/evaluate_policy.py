@@ -98,7 +98,7 @@ def parse_args(argv=None):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--task", choices=GR1_TASKS, action="append")
-    parser.add_argument("--n-episodes", type=int, default=20)
+    parser.add_argument("--n-episodes", type=int, default=50)
     parser.add_argument("--n-envs", type=int, default=5)
     parser.add_argument("--max-episode-steps", type=int, default=720)
     parser.add_argument(

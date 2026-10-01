@@ -6,11 +6,11 @@ import socket
 from typing import Literal
 
 import numpy as np
-from openpi_client import websocket_policy_server
 import torch
 import tyro
 
 from vjepa_policy.policy_serving import PolicyServingConfig, VJEPAPolicyServing
+from vjepa_policy.policy_serving.websocket import WebsocketPolicyServer
 
 
 @dataclasses.dataclass
@@ -94,7 +94,7 @@ def main(args, encoder_builder=None):
         socket.gethostbyname(hostname),
         args.port,
     )
-    websocket_policy_server.WebsocketPolicyServer(
+    WebsocketPolicyServer(
         policy=policy,
         host=args.host,
         port=args.port,

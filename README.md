@@ -1,7 +1,7 @@
 # V-JEPA Policy
 
 <p align="center">
-  <strong>World-action models on a frozen predictive visual latent space</strong>
+  <strong>Building Effective World-Action Models on Predictive Visual Latents</strong>
 </p>
 
 <p align="center">
@@ -10,315 +10,153 @@
   <a href="https://arxiv.org/abs/2609.37250"><img src="https://img.shields.io/badge/arXiv-2609.37250-b31b1b?style=flat&logo=arxiv&logoColor=white" alt="arXiv:2609.37250"></a>
 </p>
 
-V-JEPA Policy learns robot actions from a frozen predictive visual latent space.
-The trainable part has two modules:
+V-JEPA Policy builds a world-action model on the predictive latent space of a frozen **V-JEPA 2.1** encoder. An instruction-conditioned future-latent predictor and a flow-matching action expert couple future visual-state prediction with action generation. The predictor's future-informed context key–value states condition the action expert. The default model uses V-JEPA 2.1 ViT-L and a frozen T5-XXL text encoder with cached instruction embeddings.
 
-1. a language and state conditioned predictor for future visual latents;
-2. a flow matching action expert that attends to the predictor context.
+<p align="center">
+  <a href="assets/figures/architecture.pdf">
+    <img src="assets/figures/architecture.png" width="1000" alt="V-JEPA Policy architecture: frozen visual and text encoders, an instruction-conditioned future predictor, and a flow-matching action expert.">
+  </a>
+</p>
 
-The released recipe uses V-JEPA 2.1 ViT-L and T5-XXL as frozen encoders. The
-visual encoder is a registry entry, so a different visual latent substrate can
-be selected without changing the predictor or action expert. Checkpoints,
-datasets, simulator assets, text caches, and evaluation outputs stay outside Git.
+**Architecture.** The future predictor learns from frozen visual targets, while its future-informed context states condition the action expert. Future clips provide supervision during training.
 
-## Results at a glance
+We study two variants:
 
-The default policy has 0.9B total parameters, 0.6B trainable parameters, a
-frozen V-JEPA 2.1 ViT-L encoder, and a frozen T5-XXL text encoder.
+- **From Scratch:** jointly learn the future predictor and action expert from task-specific demonstrations in a single downstream stage.
+- **Pretrained Predictor:** first pretrain only the future predictor on DROID video–instruction pairs, with proprioceptive conditioning and no action labels or action expert. Transfer the predictor weights to downstream joint training with a freshly initialized action expert.
 
-| Initialization | LIBERO | LIBERO-Plus | RoboCasa-GR1 |
+The visual and text encoders remain frozen in both variants.
+
+## Results
+
+| Variant | LIBERO | LIBERO-Plus | RoboCasa-GR1 |
 | --- | ---: | ---: | ---: |
-| From scratch | 97.25 | 79.25 | 50.92 |
-| DROID predictor | **98.70** | **91.50** | **55.58** |
+| From Scratch | 97.25 | 79.25 | 50.92 |
+| Pretrained Predictor | **98.70** | **91.50** | **55.58** |
 
-Scores are success rates in percent. The DROID row transfers only the future
-predictor; the action expert is initialized from scratch downstream.
+Success rates (%) from Table 5 of the [paper](https://arxiv.org/abs/2609.37250). The comparison uses the same downstream data, training protocols, and budgets; predictor-only pretraining adds an upstream training stage. LIBERO-Plus evaluates the policies trained on LIBERO without further fine-tuning.
 
-## Support matrix
+<p align="center">
+  <a href="assets/figures/predictor-pretraining.pdf">
+    <img src="assets/figures/predictor-pretraining.png" width="800" alt="Predictor pretraining compared with extended training from scratch on LIBERO and LIBERO-Plus, and success-rate gains across seven LIBERO-Plus perturbation axes.">
+  </a>
+</p>
 
-| Capability | Entry point | Status |
-| --- | --- | --- |
-| DROID predictor pretraining | `scripts/pretrain_droid_predictor_vjepa21_maxviews4.sh` | Reference recipe |
-| Predictor pretraining on custom datasets | `scripts/pretrain_predictor.py` | Dataset factory API |
-| Policy post-training on LeRobot | `scripts/train_vjepa_policy.sh` | LeRobot adapter |
-| Policy post-training on custom datasets | `scripts/train_vjepa_policy.py` | Dataset factory API |
-| LIBERO training and evaluation | `examples/libero/` | Reference scripts; requires the LIBERO simulator |
-| RoboCasa-GR1 training and evaluation | `scripts/gr1/`, `examples/gr1/` | Reference scripts; requires RoboCasa and Isaac-GR00T |
-| LIBERO-Plus evaluation | `scripts/run_libero_plus_canonical.sh` | External `vla-evaluation-harness` integration |
-| Alternative visual encoders | `src/vjepa_policy/encoders/` | Encoder registry and geometry contract |
+**Predictor pretraining and transfer (Figure 2).** Left: the pretrained predictor at the default downstream budget compared with an extended From Scratch run. Right: improvements across all seven LIBERO-Plus perturbation axes at the same default downstream budget; gains are in percentage points.
 
-## Layout
+## Checkpoint release plan
 
-```text
-src/vjepa_policy/
-  encoders/                 frozen encoder registry and geometry contracts
-  datasets/                 LeRobot, DROID, transforms, normalization
-  models/                   predictor, action expert, policy, V-JEPA backbones
-  policy_serving/           LIBERO and GR-1 checkpoint adapters
-  dataset_api.py            small custom dataset factory contract
-  trainer.py                Accelerate training loop and checkpoints
-scripts/
-  pretrain_predictor.py     generic predictor-only pretraining
-  pretrain_droid_predictor.py
-  train_vjepa_policy.py     generic post-training on LeRobot or an adapter
-  train_vjepa_policy.sh     LIBERO reference launcher
-  gr1/                      GR-1 preparation and training
-examples/
-  libero/                   websocket server, client, and evaluation launcher
-  gr1/                      GR-1 server and rollout evaluator
-```
+Researchers can train models now using the recipes below. We plan to release:
 
-The repository contains source only. Checkpoints, datasets, simulator assets,
-logs, and evaluation outputs are intentionally kept outside Git.
+- [ ] LIBERO policy checkpoints.
+- [ ] RoboCasa-GR1 policy checkpoints.
+- [ ] The future predictor pretrained on DROID.
 
-## Install
+Checkpoint download links and the accompanying configurations and normalization statistics will be added here when the releases are available.
+
+## Installation
+
+Use a dedicated conda environment with Python 3.10+. The training and benchmark launchers target Linux with NVIDIA GPUs and require Bash 4+ and Linux command-line tools.
 
 ```bash
 git clone --branch release https://github.com/breez3young/VJEPA-Policy.git
 cd VJEPA-Policy
-python -m venv .venv
-source .venv/bin/activate
+conda create -n vjepa-policy python=3.10 pip -y
+conda activate vjepa-policy
 python -m pip install --upgrade pip
+# Install a PyTorch build appropriate for your CUDA driver first; see Setup.
 python -m pip install -e .
-```
-
-Python 3.10 or newer is required. The paper recipes use BF16 on multi-GPU NVIDIA
-systems; memory depends on image size, views, and activation checkpointing. The
-optional `libero` extra installs the local LIBERO simulator dependencies. The
-LIBERO websocket server also needs the `openpi-client` package. GR-1 uses the
-official Isaac-GR00T and RoboCasa environments and must be installed separately.
-
-```bash
-python -m pip install -e '.[libero]'
-python -m pip install openpi-client
-```
-
-Check the install and list the stable encoder IDs before downloading weights:
-
-```bash
-python - <<'PY'
-import torch
-from vjepa_policy.encoders import encoder_names
-print("torch", torch.__version__)
-print("encoders", ", ".join(encoder_names()))
-PY
-```
-
-## Choose an encoder
-
-List the built-in registry IDs:
-
-```bash
 python -c 'from vjepa_policy.encoders import encoder_names; print("\n".join(encoder_names()))'
 ```
 
-The stable registry exposes `vjepa2_vitl`, `vjepa2_1_vitl`, DINOv2, DINOv3,
-WAN2.2, and geometry variants. A custom encoder implements the `EncoderSpec`
-contract and calls `register_encoder`; training and serving then use the same
-`--encoder` argument. The encoder must expose a stable latent grid and feature
-width so the predictor can build its mask and projection layers.
+The repository contains source and configuration templates. Prepare the encoder weights, training data, text caches, and simulator assets as described in [Setup](docs/setup.md). For checkpoint serving, install `.[serving]`; simulator installation is covered by each benchmark's evaluation guide.
 
-To inspect the exact registry for a checkout:
+## Training
 
-```bash
-python -c 'from vjepa_policy.encoders import encoder_names; print("\\n".join(encoder_names()))'
-```
+Training jointly optimizes the future predictor and action expert on downstream demonstrations. **The tutorial below uses LIBERO as an example.** The same training entry point supports other LeRobot datasets and custom dataset adapters; see the [training guide](docs/training.md) and [dataset/encoder contracts](docs/extensions.md).
 
-## Dataset contract
-
-The built-in post-training path reads one or more LeRobot roots and discovers
-camera features from `meta/info.json`. For another storage format, implement a
-small factory in an importable module:
-
-```python
-def build_dataset(args, include_action=True):
-    dataset = MyDataset(args)
-    return dataset
-```
-
-Each sample must contain:
-
-```text
-video         [views, channels, frames, height, width] or [channels, frames, height, width]
-context       [text_length, text_width] T5 features
-context_mask  [text_length] boolean mask
-proprio       [state_width]
-```
-
-Post-training samples also contain `action` and `action_is_pad`. Pass
-`--dataset-factory package.module:build_dataset`, `--views ...`,
-`--action-dim`, and `--proprio-dim`. The stock collator supplies the causal
-latent masks. A factory may return `(dataset, collator)` when it needs custom
-decoding or batching.
-
-This keeps dataset code at the adapter boundary. The optimizer, checkpoint
-format, visual encoder, predictor, and action expert stay unchanged.
-
-The same boundary is used by policy post-training:
+First, copy the configuration template and set the dataset, encoder, and text-cache paths in your local copy:
 
 ```bash
-accelerate launch --num_processes 4 scripts/train_vjepa_policy.py \
-  --dataset-factory my_data:build_dataset \
-  --views camera.front camera.wrist \
-  --encoder vjepa2_1_vitl \
-  --encoder-checkpoint /path/to/vjepa2_1_vitl.pt \
-  --text-cache-dir /path/to/t5_cache \
-  --action-dim 7 --proprio-dim 8 --max-state-dim 48 \
-  --context-len 128 --action-chunk-size 32 \
-  --output-dir runs/my_policy
+cp configs/libero_vjepa21.env configs/libero_vjepa21.local.env
+# Edit configs/libero_vjepa21.local.env before sourcing it.
+source configs/libero_vjepa21.local.env
 ```
 
-## Paper recipes
+[Prepare the dataset and build the instruction cache](docs/training.md#libero), then choose a training variant.
 
-### DROID predictor
-
-Set paths in [`configs/droid_vjepa21.env`](configs/droid_vjepa21.env), build the
-129-token cache, then launch the 8-GPU, global-batch-192 recipe:
+**From Scratch** jointly trains both modules from their random initialization:
 
 ```bash
-source configs/droid_vjepa21.env
-python scripts/cache_droid_t5.py --dataset-root "$DATASET_ROOT" \
-  --cache-dir "$TEXT_CACHE_DIR" --model-name google/t5-v1_1-xxl \
-  --context-length 129 --device cuda --batch-size 1
-bash scripts/pretrain_droid_predictor_vjepa21_maxviews4.sh
-```
-
-Use `MAX_STEPS=20` and a separate `OUTPUT_DIR` for a smoke run. For arbitrary
-datasets, use `scripts/pretrain_predictor.py` with the factory contract above.
-
-### LIBERO policy
-
-Build a 128-token instruction cache, set paths in
-[`configs/libero_vjepa21.env`](configs/libero_vjepa21.env), then choose scratch
-or DROID initialization:
-
-```bash
-source configs/libero_vjepa21.env
 bash scripts/train_vjepa_policy_fresh_packed48.sh
+```
 
+For **Pretrained Predictor**, complete [predictor-only pretraining](docs/training.md#predictor-only-pretraining) first, then provide the resulting predictor checkpoint:
+
+```bash
 export PREDICTOR_INIT=/path/to/droid/checkpoint_step100000.pt
 bash scripts/train_vjepa_policy_droid_init.sh
 ```
 
-The paper setting is two independent 224px views, 32-step actions, global batch
-128, and 21,360 updates. DROID uses a 129-token cache; LIBERO uses 128. When
-DROID has four view-embedding rows and LIBERO has two inputs, the loader
-automatically maps source rows `[0, 1]` into the two-row policy embedding; all
-other predictor parameters still load strictly. Use `--predictor-view-map` to
-override that mapping for a custom camera order.
-
-For arbitrary post-training datasets, call `scripts/train_vjepa_policy.py`
-with `--dataset-factory`, `--views`, `--action-dim`, and `--proprio-dim`.
-
-### RoboCasa-GR1
-
-Follow [`examples/gr1/README.md`](examples/gr1/README.md), then run
-`scripts/gr1/prepare.sh` and `scripts/gr1/train.sh vjepa2_1_vitl`. The rollout
-environment is external.
+The LIBERO example uses two independent 224px views, 32-step action chunks, global batch 128, and 21,360 downstream updates for either variant. For a short pipeline check, use `MAX_STEPS=20` with a separate `OUTDIR`. Hardware changes, checkpoint resumption, and additional datasets are covered in the [training guide](docs/training.md).
 
 ## Evaluation
 
-For LIBERO, set the matching encoder, 128-token cache, Python environments, and
-output directory. The same command evaluates scratch and DROID-initialized
-checkpoints; provide the corresponding run directory, checkpoint, and
-`dataset_stats.json`. Use `EVAL_SUITES=libero_spatial NUM_TRIALS_PER_TASK=1`
-for a smoke run; the paper protocol uses four suites and 50 trials per task.
+Evaluation loads a trained policy together with its frozen encoder weights, normalization statistics, and text cache. **Using LIBERO as the example**, prepare its simulator environment and follow [the evaluation guide](examples/libero/README.md):
 
 ```bash
-export VJEPA2_ENCODER_CHECKPOINT=/path/to/encoder.pt
-export TEXT_EMBEDDING_CACHE=/path/to/libero_t5xxl_len128
-export POLICY_PYTHON=/path/to/policy/python
-export LIBERO_PYTHON=/path/to/libero/python
-export EVAL_DIR=/path/to/results/libero
-bash examples/libero/evaluate_policy.sh /path/to/run_dir \
-  /path/to/run_dir/checkpoint_step021360.pt
+cp configs/libero_eval.env configs/libero_eval.local.env
+# Edit the paths for the checkpoint and its matching artifacts/environments.
+source configs/libero_eval.local.env
+export EVAL_DIR="$RUN_DIR/libero_eval_$(date -u +%Y%m%dT%H%M%SZ)"
+bash examples/libero/evaluate_policy.sh "$RUN_DIR" "$CHECKPOINT"
 ```
 
-On the reference machine, the tested environments are
-`/data/zhangyang/miniconda3/envs/libero` for simulation,
-`/data/zhangyang/miniconda3/envs/libero-plus-eval` for LIBERO-Plus, and
-`/data/zhangyang/miniconda3/envs/libero-pro-eval` for LIBERO-Pro. The policy
-server uses the project policy environment; set `POLICY_PYTHON` explicitly when
-it is different from the shell's Python.
+Use the same evaluation procedure for the From Scratch and Pretrained Predictor variants, selecting each run's checkpoint and matching artifacts. Benchmark setup, protocols, reduced runs, and result interpretation live with their examples:
 
-LIBERO-Plus is evaluated through the external
-[`allenai/vla-evaluation-harness`](https://github.com/allenai/vla-evaluation-harness).
-Use a harness checkout that provides the V-JEPA integration:
-`scripts/libero_plus_runtime_env.sh`,
-`src/vla_eval/model_servers/vjepa_policy.py`, and
-`configs/model_servers/vjepa_policy/vjepa2_1_libero.yaml`.
+| Benchmark | Evaluation guide | Paper protocol |
+| --- | --- | --- |
+| LIBERO | [examples/libero](examples/libero/README.md) | 40 tasks × 50 episodes = 2,000 episodes |
+| LIBERO-Plus | [examples/libero_plus](examples/libero_plus/README.md) | 10,030 perturbed tasks, without further fine-tuning |
+| RoboCasa-GR1 | [examples/gr1](examples/gr1/README.md) | 24 tasks × 50 episodes = 1,200 episodes |
 
-Set `VLA_HARNESS_ROOT`, `VLA_BENCH_ENV` (contains `vla-eval`),
-`VJEPA_SERVER_PYTHON`, `VLA_LIBERO_PLUS_ROOT`, and
-`VLA_LIBERO_PLUS_ASSETS`. Set `VLA_IMAGEMAGICK_HOME` when MagickWand is not
-available. Create a server config from the harness V-JEPA template using the
-same policy checkpoint, frozen encoder, 128-token cache, and `dataset_stats`.
+## Agent skills
 
-Run the paper topology with four servers, eight simulator clients per server,
-32 shards, and batch size 8:
+[AGENTS.md](AGENTS.md) maps tasks to the skills in [.agents/skills](.agents/skills). They use the same guides and entry points as the tutorials above.
 
-```bash
-export VJEPA_SERVER_CONFIG=/path/to/vjepa2_1_droid_init_libero_plus.yaml
-scripts/run_libero_plus_canonical.sh \
-  --harness-root "$VLA_HARNESS_ROOT" \
-  --server-config "$VJEPA_SERVER_CONFIG" \
-  --checkpoint /path/to/checkpoint_step021360.pt \
-  --pretrained-encoder /path/to/vjepa2_1_vitl.pt \
-  --dataset-stats /path/to/dataset_stats.json \
-  --text-cache-dir /path/to/libero_plus_t5xxl_len128 \
-  --gpus 0,1,2,3 --sim-gpus 0,1,2,3 \
-  --clients-per-gpu 8 --batch-size 8 \
-  --output-dir /path/to/results/libero-plus
-```
+| Skill | Purpose |
+| --- | --- |
+| `vjepa-policy-training` | Data/cache preparation, predictor-only pretraining, downstream joint training |
+| `vjepa-policy-inference` | Resolve a checkpoint's serving contract and check one action request |
+| `vjepa-policy-libero-eval` | Four-suite LIBERO scoring and coverage checks |
+| `vjepa-policy-libero-plus-eval` | Native LIBERO-Plus setup, prompt caching, rollouts, and coverage checks |
+| `vjepa-policy-gr1` | GR-1 preparation, training, and rollout contracts |
 
-The complete paper run contains 10,030 episodes. For a smoke run, use a
-benchmark YAML with `max_tasks: 1` and add `--allow-incomplete`.
+For example: “Use vjepa-policy-libero-eval to evaluate this checkpoint with its training statistics and T5 cache.”
 
-## Checkpoints and artifacts
+## Development checks
 
-Keep encoder weights, predictor or policy checkpoints, normalization statistics,
-and T5 caches in an artifact store or local data directory. A policy checkpoint
-and its `dataset_stats.json` must come from the same training run.
+[Lightweight checks](docs/development.md) cover evaluation coverage and training launcher contracts without model weights, simulators, or GPUs. The GitHub Actions workflow runs them on Python 3.10 and 3.12. Environment reports are available through `scripts/check_environment.py`; GPU training and benchmark rollouts remain separate checks.
+
+## Repository map
 
 ```text
-checkpoint_step*.pt
-dataset_stats.json
-encoder checkpoint or model directory
-T5 cache (DROID: embeddings.bin, index.json, manifest.json;
-          LIBERO/GR-1: prompt-indexed *.pt files)
-resolved command and environment metadata
+src/vjepa_policy/    encoders, datasets, predictor, action expert, trainer, serving
+scripts/            training, DROID caching, GR-1 preparation, environment/result checks
+examples/
+  libero/           LIBERO serving, rollouts, and evaluation guide
+  libero_plus/      native Plus setup, task manifest, text cache, and evaluation
+  gr1/              RoboCasa-GR1 serving, rollouts, and evaluation guide
+configs/            local configuration templates and shared recipe defaults
+tests/              CPU-only evaluation and launcher regression checks
+docs/               setup, training, and extension guides
+assets/figures/     paper figures for this README (PNG previews and vector PDFs)
+.agents/skills/     task-specific instructions for coding agents
 ```
-
-`dataset_stats.json` must come from the same dataset and normalization settings
-as the checkpoint. `--predictor-init` imports only predictor weights; `--resume`
-restores training progress and optimizer scheduling.
-
-## Troubleshooting
-
-- **Shape or mask mismatch:** keep `num_frames`, `tubelet_size`, `crop_size`,
-  views, and encoder ID identical between training and serving. Read the
-  serialized `encoder_spec` in checkpoint metadata.
-- **Text cache failure:** use the same context length at cache construction and
-  training. Cache construction disables truncation and fails on an overlong
-  prompt instead of silently changing the contract.
-- **Legacy LIBERO checkpoint:** older scratch checkpoints without packed-state
-  metadata use the variable-width state contract. Serve them with
-  `--max-state-dim 0`, the matching 32-token cache, and the camera views saved
-  by that run. DROID-init checkpoints use `max_state_dim=48` and the 128-token
-  cache shown above.
-- **Out of memory:** lower per-device `BATCH_SIZE`, enable more activation
-  checkpointing blocks, or use gradient accumulation while preserving the
-  intended global batch.
-- **LIBERO/LIBERO-Plus EGL abort:** use the harness sharded runner with one
-  simulator process per shard, `MUJOCO_GL=egl`, and a fresh output directory.
-  Keep the selected simulator GPUs exclusive and idle; concurrent MuJoCo or
-  RoboTwin jobs can leave native workers in D-state before the first episode.
-  If the host has no usable EGL device, run the simulator in its supported
-  software backend and record that setting with the result.
 
 ## Citation
 
-Please cite the arXiv preprint:
+If you find V-JEPA Policy useful for your research, please consider citing:
 
 ```bibtex
 @misc{zhang2026vjepapolicybuildingeffective,
@@ -334,6 +172,4 @@ Please cite the arXiv preprint:
 
 ## License
 
-This repository is released under the [MIT License](LICENSE). Upstream visual
-encoders, T5 checkpoints, datasets, simulator assets, and evaluation harnesses
-retain their own licenses and terms.
+This repository is released under the [MIT License](LICENSE). Upstream visual encoders, T5 checkpoints, datasets, simulator assets, and evaluation harnesses retain their own licenses and terms.

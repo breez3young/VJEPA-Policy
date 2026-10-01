@@ -10,16 +10,42 @@ CHECKPOINT=${2:-$RUN_DIR/checkpoint_step021360.pt}
 : "${VJEPA2_ENCODER_CHECKPOINT:?Set VJEPA2_ENCODER_CHECKPOINT}"
 : "${TEXT_EMBEDDING_CACHE:?Set TEXT_EMBEDDING_CACHE}"
 
+EVAL_BENCHMARK=${EVAL_BENCHMARK:-libero}
+case "$EVAL_BENCHMARK" in libero|libero-plus) ;; *) echo "Unknown benchmark: $EVAL_BENCHMARK" >&2; exit 64 ;; esac
 POLICY_PYTHON=${POLICY_PYTHON:-python}
 LIBERO_PYTHON=${LIBERO_PYTHON:-python}
 LIBERO_TORCH_LIB=${LIBERO_TORCH_LIB:-}
 LIBERO_MUJOCO_GL=${LIBERO_MUJOCO_GL:-egl}
+case "$LIBERO_MUJOCO_GL" in egl|osmesa) ;; *) echo "Choose egl or osmesa" >&2; exit 64 ;; esac
 POLICY_SERVER_SCRIPT=${POLICY_SERVER_SCRIPT:-examples/libero/serve_policy.py}
-EVAL_DIR=${EVAL_DIR:-$RUN_DIR/libero_eval_r16_50trials}
+EVAL_DIR=${EVAL_DIR:-$RUN_DIR/libero_eval_$(date -u +%Y%m%dT%H%M%SZ)}
 DATASET_STATS=${DATASET_STATS:-$RUN_DIR/dataset_stats.json}
 BASE_PORT=${BASE_PORT:-14001}
 REPLAN_STEPS=${REPLAN_STEPS:-16}
-NUM_TRIALS_PER_TASK=${NUM_TRIALS_PER_TASK:-50}
+if [[ "$EVAL_BENCHMARK" == "libero-plus" ]]; then
+  NUM_TRIALS_PER_TASK=${NUM_TRIALS_PER_TASK:-1}
+else
+  NUM_TRIALS_PER_TASK=${NUM_TRIALS_PER_TASK:-50}
+fi
+FRAME_STRIDE=${FRAME_STRIDE:-4}
+MAX_TASKS=${MAX_TASKS:-}
+RECORD_VIDEO=${RECORD_VIDEO:-1}
+ALLOW_INCOMPLETE=${ALLOW_INCOMPLETE:-0}
+EVAL_SERIAL=${EVAL_SERIAL:-0}
+case "$EVAL_SERIAL" in 0|1) ;; *) echo "EVAL_SERIAL must be 0 or 1" >&2; exit 64 ;; esac
+client_args=()
+validator_args=()
+if [[ "$ALLOW_INCOMPLETE" == 1 ]]; then validator_args+=(--allow-incomplete); fi
+if [[ -n "$MAX_TASKS" ]]; then
+  [[ "$MAX_TASKS" =~ ^[1-9][0-9]*$ ]] || { echo "MAX_TASKS must be positive" >&2; exit 64; }
+  [[ "$ALLOW_INCOMPLETE" == 1 ]] || { echo "Set ALLOW_INCOMPLETE=1 for a reduced run" >&2; exit 64; }
+  client_args+=(--args.max-tasks "$MAX_TASKS")
+fi
+case "$RECORD_VIDEO" in
+  1) ;;
+  0) client_args+=(--args.no-record-video) ;;
+  *) echo "RECORD_VIDEO must be 0 or 1" >&2; exit 64 ;;
+esac
 EVAL_SEED=${EVAL_SEED:-7}
 # Empty means recover the serving contract from the checkpoint.  The serving
 # config defaults still cover metadata-free canonical checkpoints.
@@ -37,11 +63,11 @@ ENCODER=${ENCODER:-}
 ENCODER_FAMILY=${ENCODER_FAMILY:-}
 ENCODER_MODEL_NAME=${ENCODER_MODEL_NAME:-}
 ENCODER_CHECKPOINT_KEY=${ENCODER_CHECKPOINT_KEY:-}
-PRED_DEPTH=${PRED_DEPTH:-24}
-PRED_EMBED_DIM=${PRED_EMBED_DIM:-1024}
-PRED_NUM_HEADS=${PRED_NUM_HEADS:-16}
-ACTION_HIDDEN_SIZE=${ACTION_HIDDEN_SIZE:-512}
-ACTION_NUM_LAYERS=${ACTION_NUM_LAYERS:-24}
+PRED_DEPTH=${PRED_DEPTH:-}
+PRED_EMBED_DIM=${PRED_EMBED_DIM:-}
+PRED_NUM_HEADS=${PRED_NUM_HEADS:-}
+ACTION_HIDDEN_SIZE=${ACTION_HIDDEN_SIZE:-}
+ACTION_NUM_LAYERS=${ACTION_NUM_LAYERS:-}
 IFS=',' read -r -a GPU_IDS <<<"${EVAL_GPUS:-0,1,2,3}"
 ALL_SUITES=(libero_spatial libero_object libero_goal libero_10)
 IFS=',' read -r -a SUITES <<<"${EVAL_SUITES:-libero_spatial,libero_object,libero_goal,libero_10}"
@@ -58,57 +84,64 @@ if [[ ! -f "$POLICY_SERVER_SCRIPT" ]]; then
   echo "Missing policy server script: $POLICY_SERVER_SCRIPT" >&2
   exit 1
 fi
-if [[ -z "$POLICY_MAX_STATE_DIM" || -z "$POLICY_T5_LEN" ]]; then
-  read -r checkpoint_state_dim checkpoint_t5_len < <("$POLICY_PYTHON" - "$CHECKPOINT" <<'PY'
-import sys
-import torch
-
-checkpoint = torch.load(sys.argv[1], map_location="cpu", weights_only=False, mmap=True)
-serving = checkpoint.get("policy_serving") or {}
-saved = serving.get("config") or {}
-topology = checkpoint.get("model_topology") or {}
-state_dim = saved.get("max_state_dim", topology.get("max_state_dim"))
-print(0 if state_dim is None else int(state_dim), int(saved.get("t5_len", 128)))
-PY
-  )
-  [[ -n "$POLICY_MAX_STATE_DIM" ]] || POLICY_MAX_STATE_DIM="$checkpoint_state_dim"
-  [[ -n "$POLICY_T5_LEN" ]] || POLICY_T5_LEN="$checkpoint_t5_len"
+if [[ "$EVAL_BENCHMARK" == "libero-plus" ]]; then
+  : "${LIBERO_PLUS_MANIFEST:?Set LIBERO_PLUS_MANIFEST; run examples/libero_plus/prepare.py first}"
+  : "${LIBERO_CONFIG_PATH:?Set the isolated LIBERO_CONFIG_PATH from prepare.py}"
+  [[ "$NUM_TRIALS_PER_TASK" == 1 ]] || { echo "Plus uses one episode per task" >&2; exit 64; }
+  "$POLICY_PYTHON" scripts/validate_eval_results.py cache-plus "$TEXT_EMBEDDING_CACHE" \
+    --manifest "$LIBERO_PLUS_MANIFEST" --context-length "${POLICY_T5_LEN:-128}"
+  client_args+=(--args.benchmark libero-plus --args.manifest "$LIBERO_PLUS_MANIFEST")
 fi
 if (( ${#SUITES[@]} == 0 )); then
   echo "EVAL_SUITES must contain at least one suite" >&2
   exit 64
 fi
-declare -A requested_suites=()
+requested_suites=()
 for suite in "${SUITES[@]}"; do
   if [[ ! " ${ALL_SUITES[*]} " =~ " $suite " ]]; then
     echo "Unknown LIBERO suite: $suite" >&2
     exit 64
   fi
-  if [[ -v "requested_suites[$suite]" ]]; then
+  if [[ " ${requested_suites[*]:-} " == *" $suite "* ]]; then
     echo "EVAL_SUITES must not contain duplicates: $suite" >&2
     exit 64
   fi
-  requested_suites[$suite]=1
+  requested_suites+=("$suite")
 done
-if (( ${#GPU_IDS[@]} < ${#SUITES[@]} )); then
-  echo "EVAL_GPUS must contain at least ${#SUITES[@]} comma-separated GPU IDs" >&2
+if (( ${#GPU_IDS[@]} == 0 )) || [[ -z "${GPU_IDS[0]}" ]]; then
+  echo "EVAL_GPUS must contain a GPU ID" >&2
   exit 1
+fi
+if [[ "$EVAL_SERIAL" == 0 ]] && (( ${#GPU_IDS[@]} < ${#SUITES[@]} )); then
+  echo "Provide a GPU entry per suite, or set EVAL_SERIAL=1 to reuse one GPU" >&2
+  exit 1
+fi
+if [[ -e "$EVAL_DIR" ]]; then
+  if [[ ! -d "$EVAL_DIR" ]] || [[ -n "$(find "$EVAL_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "EVAL_DIR must be a fresh, empty directory: $EVAL_DIR" >&2
+    exit 1
+  fi
 fi
 mkdir -p "$EVAL_DIR"
 SUMMARY_LOG="$EVAL_DIR/summary.txt"
+if [[ "$EVAL_BENCHMARK" == "libero-plus" ]]; then
+  cp "$LIBERO_PLUS_MANIFEST" "$EVAL_DIR/task_manifest.json"
+  cp "$TEXT_EMBEDDING_CACHE/libero_plus_cache.json" "$EVAL_DIR/cache_manifest.json"
+fi
 
 {
-  echo "LIBERO evaluation"
+  echo "$EVAL_BENCHMARK evaluation"
   echo "checkpoint: $CHECKPOINT"
   echo "policy_server_script: $POLICY_SERVER_SCRIPT"
-  echo "started: $(date -Is)"
+  echo "started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "replan_steps: $REPLAN_STEPS"
-  echo "frame_stride: 4"
+  echo "frame_stride: $FRAME_STRIDE"
   echo "trials_per_task: $NUM_TRIALS_PER_TASK"
   echo "seed: $EVAL_SEED"
   echo "mujoco_gl: $LIBERO_MUJOCO_GL"
-  echo "t5_len: $POLICY_T5_LEN"
+  echo "t5_len: ${POLICY_T5_LEN:-checkpoint}"
   echo "requested_suites: ${SUITES[*]}"
+  echo "serial_suites: $EVAL_SERIAL"
   echo "view_layout: $POLICY_VIEW_LAYOUT"
   echo "crop_size: $POLICY_CROP_SIZE"
   echo "encoder_endpoint_rope: ${POLICY_ENCODER_INTERPOLATE_ROPE:-checkpoint}"
@@ -126,20 +159,20 @@ run_suite() (
   status_file="$EVAL_DIR/${suite}.status"
   results_file="$EVAL_DIR/$suite/${suite}_eval_results.txt"
   server_pid=""
+  client_pid=""
 
   cleanup() {
+    if [[ -n "$client_pid" ]]; then
+      kill "$client_pid" 2>/dev/null || true
+      wait "$client_pid" 2>/dev/null || true
+    fi
     if [[ -n "$server_pid" ]]; then
       kill "$server_pid" 2>/dev/null || true
       wait "$server_pid" 2>/dev/null || true
     fi
   }
-  trap cleanup EXIT INT TERM
-
-  if [[ -s "$results_file" ]]; then
-    echo 0 >"$status_file"
-    echo "[$(date -Is)] [$suite] reusing $results_file"
-    exit 0
-  fi
+  trap cleanup EXIT
+  trap 'exit 130' INT TERM HUP
 
   rope_args=()
   if [[ -n "$POLICY_CORRECTED_PREDICTOR_ROPE" ]]; then
@@ -172,6 +205,21 @@ run_suite() (
   if [[ -n "$POLICY_VIEW_LAYOUT" ]]; then
     serving_args+=(--view-layout "$POLICY_VIEW_LAYOUT")
   fi
+  if [[ -n "$PRED_DEPTH" ]]; then
+    serving_args+=(--pred-depth "$PRED_DEPTH")
+  fi
+  if [[ -n "$PRED_EMBED_DIM" ]]; then
+    serving_args+=(--pred-embed-dim "$PRED_EMBED_DIM")
+  fi
+  if [[ -n "$PRED_NUM_HEADS" ]]; then
+    serving_args+=(--pred-num-heads "$PRED_NUM_HEADS")
+  fi
+  if [[ -n "$ACTION_HIDDEN_SIZE" ]]; then
+    serving_args+=(--action-hidden-size "$ACTION_HIDDEN_SIZE")
+  fi
+  if [[ -n "$ACTION_NUM_LAYERS" ]]; then
+    serving_args+=(--action-num-layers "$ACTION_NUM_LAYERS")
+  fi
   view_args=()
   if [[ -n "$POLICY_VIEWS" ]]; then
     IFS=',' read -r -a policy_views <<<"$POLICY_VIEWS"
@@ -201,11 +249,6 @@ run_suite() (
     "${serving_args[@]}" \
     "${view_args[@]}" \
     "${rope_args[@]}" \
-    --pred-depth "$PRED_DEPTH" \
-    --pred-embed-dim "$PRED_EMBED_DIM" \
-    --pred-num-heads "$PRED_NUM_HEADS" \
-    --action-hidden-size "$ACTION_HIDDEN_SIZE" \
-    --action-num-layers "$ACTION_NUM_LAYERS" \
     --seed "$EVAL_SEED" \
     --port "$port" \
     >"$server_log" 2>&1 &
@@ -257,38 +300,53 @@ run_suite() (
       "${client_env[@]}" \
       "$LIBERO_PYTHON" \
       examples/libero/run_libero_client.py \
+        "${client_args[@]}" \
         --args.host 127.0.0.1 \
         --args.port "$port" \
         --args.task-suite-name "$suite" \
         --args.replan-steps "$REPLAN_STEPS" \
-        --args.frame-stride 4 \
+        --args.frame-stride "$FRAME_STRIDE" \
         --args.resize-size 256 \
         --args.num-trials-per-task "$NUM_TRIALS_PER_TASK" \
         --args.seed "$EVAL_SEED" \
         --args.video-out-path "$EVAL_DIR/$suite" \
-        >"$client_log" 2>&1
+        >"$client_log" 2>&1 &
   else
-    env -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY \
+    client_env+=("PYOPENGL_PLATFORM=osmesa" "LIBGL_ALWAYS_SOFTWARE=1")
+    env -u MUJOCO_EGL_DEVICE_ID -u EGL_PLATFORM -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY \
       "${client_env[@]}" \
       "$LIBERO_PYTHON" \
       examples/libero/run_libero_client.py \
+        "${client_args[@]}" \
         --args.host 127.0.0.1 \
         --args.port "$port" \
         --args.task-suite-name "$suite" \
         --args.replan-steps "$REPLAN_STEPS" \
-        --args.frame-stride 4 \
+        --args.frame-stride "$FRAME_STRIDE" \
         --args.resize-size 256 \
         --args.num-trials-per-task "$NUM_TRIALS_PER_TASK" \
         --args.seed "$EVAL_SEED" \
         --args.video-out-path "$EVAL_DIR/$suite" \
-        >"$client_log" 2>&1
+        >"$client_log" 2>&1 &
   fi
+  client_pid=$!
+  wait "$client_pid"
   client_status=$?
+  client_pid=""
   set -e
 
   if (( client_status == 0 )) && [[ -s "$results_file" ]]; then
-    echo 0 >"$status_file"
-    exit 0
+    task_count=10
+    if [[ -n "$MAX_TASKS" ]] && (( MAX_TASKS < task_count )); then task_count=$MAX_TASKS; fi
+    validation=(libero "$results_file" --suite "$suite" --trials "$NUM_TRIALS_PER_TASK" --task-count "$task_count")
+    if [[ "$EVAL_BENCHMARK" == "libero-plus" ]]; then
+      validation=(libero-plus "$EVAL_DIR" --manifest "$LIBERO_PLUS_MANIFEST" --suites "$suite" "${validator_args[@]}")
+    fi
+    if "$POLICY_PYTHON" scripts/validate_eval_results.py "${validation[@]}"; then
+      echo 0 >"$status_file"
+      exit 0
+    fi
+    client_status=2
   fi
   if (( client_status == 0 )); then
     client_status=2
@@ -298,21 +356,37 @@ run_suite() (
 )
 
 worker_pids=()
+cleanup_workers() {
+  for pid in "${worker_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${worker_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+}
+trap cleanup_workers EXIT
+trap 'exit 130' INT TERM HUP
+worker_failures=0
 for index in "${!SUITES[@]}"; do
+  gpu_index=$((index % ${#GPU_IDS[@]}))
   run_suite \
     "${SUITES[$index]}" \
-    "${GPU_IDS[$index]}" \
+    "${GPU_IDS[$gpu_index]}" \
     "$((BASE_PORT + index))" \
     >"$EVAL_DIR/${SUITES[$index]}_runner.log" 2>&1 &
   worker_pids+=("$!")
-  sleep 2
+  if [[ "$EVAL_SERIAL" == 1 ]]; then
+    if ! wait "${worker_pids[0]}"; then
+      worker_failures=$((worker_failures + 1))
+    fi
+    worker_pids=()
+  else
+    sleep 2
+  fi
 done
 
-set +e
 for worker_pid in "${worker_pids[@]}"; do
-  wait "$worker_pid"
+  if ! wait "$worker_pid"; then
+    worker_failures=$((worker_failures + 1))
+  fi
 done
-set -e
+worker_pids=()
 
 failed=()
 requested_failed=()
@@ -321,9 +395,7 @@ total_episodes=0
 for suite in "${SUITES[@]}"; do
   results_file="$EVAL_DIR/$suite/${suite}_eval_results.txt"
   status=missing
-  if [[ -s "$results_file" ]]; then
-    status=0
-  elif [[ -f "$EVAL_DIR/${suite}.status" ]]; then
+  if [[ -f "$EVAL_DIR/${suite}.status" ]]; then
     status=$(<"$EVAL_DIR/${suite}.status")
   fi
   {
@@ -337,7 +409,7 @@ for suite in "${SUITES[@]}"; do
   } >>"$SUMMARY_LOG"
   if [[ "$status" != 0 ]] || [[ ! -s "$results_file" ]]; then
     failed+=("$suite")
-    if [[ -v "requested_suites[$suite]" ]]; then
+    if [[ " ${requested_suites[*]:-} " == *" $suite "* ]]; then
       requested_failed+=("$suite")
     fi
     continue
@@ -349,8 +421,9 @@ for suite in "${SUITES[@]}"; do
 done
 
 {
-  echo "finished: $(date -Is)"
+  echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "successful_suites: $((${#SUITES[@]} - ${#failed[@]}))/${#SUITES[@]}"
+  echo "worker_failures: $worker_failures"
   echo "failed_suites: ${failed[*]:-none}"
   if (( total_episodes > 0 )); then
     awk -v successes="$total_success" -v episodes="$total_episodes" \
@@ -358,9 +431,14 @@ done
   fi
 } >>"$SUMMARY_LOG"
 
-if (( ${#requested_failed[@]} > 0 )); then
+if (( ${#requested_failed[@]} > 0 || worker_failures > 0 )); then
   echo "Requested LIBERO evaluation incomplete: ${requested_failed[*]}" >&2
   exit 1
 fi
 
-echo "[done] LIBERO evaluation summary: $SUMMARY_LOG"
+if [[ "$EVAL_BENCHMARK" == "libero-plus" ]]; then
+  "$POLICY_PYTHON" scripts/validate_eval_results.py libero-plus "$EVAL_DIR" \
+    --manifest "$LIBERO_PLUS_MANIFEST" --suites "${SUITES[@]}" "${validator_args[@]}" \
+    > "$EVAL_DIR/results.json"
+fi
+echo "[done] $EVAL_BENCHMARK evaluation summary: $SUMMARY_LOG"

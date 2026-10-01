@@ -1,54 +1,34 @@
-# RoboCasa GR-1
+# RoboCasa-GR1 preparation and training
 
-The GR-1 LeRobot release stores a 44-dimensional state and absolute action. This
-experiment selects the official `robocasa_gr1_tabletop` 29D order:
+Start with [Setup](../../docs/setup.md). Copy `configs/gr1_vjepa21.env` to `configs/gr1_vjepa21.local.env`, set `DATA_ROOT` and `WEIGHTS`, then source it. `WEIGHTS` must contain `vjepa2_1_vitl_dist_vitG_384.pt` for the default encoder.
+
+```bash
+source configs/gr1_vjepa21.local.env
+python -m scripts.gr1.download_dataset --local-dir "$DATA_ROOT"
+bash scripts/gr1/prepare.sh
+bash scripts/gr1/train.sh vjepa2_1_vitl
+```
+
+The downloader uses the Hugging Face Hub API for the 24 task directories listed in `scripts/gr1/dataset_manifest.py` from `nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim`. It is resumable through the Hub cache. This is not the separate GR00T-Teleop-Sim dataset.
+
+Preparation checks the 20 Hz, 44D schema, camera/video data, task remarks, and 1,000 episodes per task (24,000 total). It computes exact action minima/maxima and binds the statistics to a deterministic local-data manifest. Artifacts are written to `ARTIFACT_ROOT`:
 
 ```text
-29D order: left_arm, right_arm, left_hand, right_hand, waist
-state condition: concat(sin(state), cos(state)), 29D -> 58D
-action target: absolute 29D action
+dataset_stats_absolute_minmax_ck16.json
+text_embeddings/                         # remarks, T5 length 48 by default
 ```
 
-State is not normalized. Exact global action minima and maxima are obtained by
-reducing the exact per-task minima and maxima, then map absolute actions to
-`[-1, 1]` with clipping. Preparation validates all
-24 task roots, including the 20 Hz 44D schema, ego-view resolution, codec ranges,
-exactly 1,000 parquet/video episodes, and non-empty remarks. It then binds the
-statistics to a deterministic local-data manifest. Download and prepare the exact
-ABot-M0 task allowlist with:
+The policy selects the 29D order `left_arm, right_arm, left_hand, right_hand, waist`. State conditioning is `concat(sin(state), cos(state))`, giving 58D, without normalization. Targets are absolute 29D actions, normalized to `[-1, 1]` using exact min/max values and clipping. LIBERO statistics and packed state do not apply to this recipe.
 
-```bash
-python scripts/gr1/download_dataset.py
-bash scripts/gr1/prepare.sh  # ACTION_CHUNK_SIZE=16 by default
-```
+The local template and `train.sh` share `configs/recipes/gr1.env`: 50,000 updates and global batch 256 (4 GPUs × batch 64 × accumulation 1). Existing environment values take precedence. Preserve the intended batch when changing GPU count. The shell script accepts only the encoder name; it does not forward arbitrary training flags. Use the Python entry point for custom training options.
 
-The downloader uses the Hugging Face Hub API to enumerate and download only the
-24 allowlisted task directories from
-`nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim`. It does not invoke Git or
-Git LFS, scan the full repository tree, or use the separate
-`PhysicalAI-Robotics-GR00T-Teleop-Sim` release. Hub metadata and incomplete files
-under the local `.cache/huggingface` directory make repeated invocations resumable.
+The default chunk 16 samples video offsets `[-4, 0, 4, 8, 12, 16]`: two observed context frames and four future frames. The launcher's `num_frames=17` describes the source window; the sampled model clip has six frames. Tail samples without complete future targets are excluded, while episode-start past context is padded.
 
-After choosing the best frozen encoder from the LIBERO ablation and running a
-micro-batch/activation-checkpointing preflight:
-
-```bash
-bash scripts/gr1/train.sh  # V-JEPA2 ViT-L, target_encoder from vitl.pt
-```
-
-The default run uses 50,000 optimizer steps and global batch 1024 on four GPUs:
-micro-batch 32 with eight accumulation steps. Run a real forward/backward preflight
-before increasing the micro-batch. The 16-step action chunk uses video offsets
-`[-4, 0, 4, 8, 12, 16]`: two context frames and four future frames. Training excludes
-episode-tail samples without the complete future target while retaining padded past
-context at episode starts.
-
-The chunk-32 follow-up is selected consistently for preparation and training:
+For chunk 32, use matching settings during both preparation and training:
 
 ```bash
 ACTION_CHUNK_SIZE=32 bash scripts/gr1/prepare.sh
-ACTION_CHUNK_SIZE=32 bash scripts/gr1/train.sh
+ACTION_CHUNK_SIZE=32 bash scripts/gr1/train.sh vjepa2_1_vitl
 ```
 
-`ACTION_CHUNK_SIZE` must be divisible by the fixed video stride of four. The launcher
-sets `num_frames=ACTION_CHUNK_SIZE+1`, so chunk 32 uses eight future frames.
+The action chunk must be divisible by four. Chunk 32 has a ten-frame sampled clip and its own `dataset_stats_absolute_minmax_ck32.json`. See the [GR-1 evaluation guide](../../examples/gr1/README.md) for serving those horizons.
